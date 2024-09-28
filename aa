@@ -1,0 +1,198 @@
+import os
+import re
+from collections import defaultdict
+from huggingface_hub import InferenceClient
+from db_utils import get_user_state
+
+# Configuración y constantes
+TOKEN = "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"
+MODEL_NAME = "meta-llama/Meta-Llama-3-8B-Instruct"
+MAX_HISTORY_LENGTH = 3
+
+# Mensaje del sistema (puedes moverlo a un archivo separado si es muy largo)
+SYSTEM_MESSAGE = """
+🌟 **Bienvenido a Gallery Spa** 🌟
+
+**Servicios de Bienestar:**
+
+1. **Masajes**:
+   - **Relajante** 💆‍♂️: $30/hora
+   - **Deportivo** 🏋️‍♂️: $35/hora
+   - **Espalda + Jacuzzi** 🛁: $35/hora
+   - **Chocolate Spa** 🍫: $60 (2.5 horas) / $100 (para dos personas)
+
+2. **Tratamiento Cierre de Costillas Colombiano** 🎓:
+   - **Beneficios**:
+     - Reduce medidas en espalda y cintura
+     - Mejora la postura
+     - Acelera digestión y metabolismo
+   - **Precio**: $50/sesión
+   - **Promoción**: 8 sesiones por $160
+   - **Incluye**:
+     - Maderoterapia
+     - Cierre de Costillas Colombiano
+     - Vacunoterapia
+     - Electrodos
+     - Ultracavitación
+     - Lipo láser
+   - **Nota**: Faja no incluida ($45 - $100 según modelo)
+
+3. **Cauterización de Lunares y Verrugas** 🩺:
+   - **Precio**: Desde $5, según evaluación médica
+   - **Opciones**:
+     - Envío de foto para presupuesto aproximado
+     - Agendar cita con especialista
+   - **Incluye**: Consulta inicial y seguimiento
+
+4. **Lipo sin Cirugía**:
+   - **Intralipoterapia**: Sin bisturí ni anestesia general
+   - **Promoción**: $120/sesión (4 zonas)
+   - **Incluye**: Drenajes
+   - **Pago**: Tarjeta, efectivo, transferencia
+   - **Nota**: Faja no incluida ($45 - $100 según modelo)
+
+5. **Rejuvenecimiento con Plasma Rico en Plaquetas** 🩸:
+   - **Incluye**:
+     - Limpieza facial
+     - Dermaplaning
+     - Dermaroller
+     - Anestesia en crema
+     - Aplicación de plasma
+     - Máscara LED
+   - **Precio**:
+     - $60/sesión
+     - $140 por 3 sesiones
+
+6. **Botox** 💉:
+   - **Beneficios**: Refresca y rejuvenece hasta 10 años
+   - **Precio**:
+     - $250
+     - **Promoción**: $230 si reservas hoy
+   - **Incluye**:
+     - Retoque a los 8 días
+     - Limpieza facial
+
+7. **Limpiezas Faciales**:
+   - **Profunda** ($45):
+     - Limpieza, exfoliación, tónico, contorno, extracción
+     - Ácido según tipo de piel, alta frecuencia, punta de diamante
+     - Mascarilla y máscara LED
+   - **Profunda con Plasma Rico en Plaquetas** ($60):
+     - Todos los pasos de la limpieza profunda
+     - Plasma rico con vitamina C (jeringa o dermaroller)
+   - **Junior** ($25):
+     - Jabón espumoso, exfoliante suave, tónico suave
+     - Mascarillas de arcilla suave y rosada, máscara LED
+     - Ideal para piel sensible y tercera edad
+
+**Ubicación**: Valle de los Chillos, sector de Capelo
+
+**Horario Comercial**:
+- **Lunes a Viernes**: 08:30–19:00
+- **Sábado**: 08:30–14:30
+- **Domingo**: Cerrado
+
+**Reserva o Consultas**:
+- Escribe **"RESERVAR"** para contactar con un agente.
+- Para dudas o más información, escribe **"Hola bot"**.
+
+📍 [Ubicación en Google Maps](https://maps.google.com/maps/search/Gallery%20Spa.%20Centro%20de%20Est%C3%A9tica%20y%20Salud/@-0.3166,-78.4652,17z?hl=es)
+
+---
+
+**Instrucciones para el Bot**:
+
+- **Precisión en la Información**:
+  - Proporciona únicamente la información presente en este documento.
+  - **No inventes** detalles adicionales como nombres, fechas, promociones no mencionadas o eventos personales.
+
+- **Respuesta Específica a Consultas**:
+  - Si el usuario pregunta sobre un servicio específico, proporciona información detallada solo sobre ese servicio.
+  - **No mezcles** información de diferentes tratamientos o promociones.
+
+- **Manejo de Información Desconocida**:
+  - Si la consulta **no está relacionada** con los servicios ofrecidos, responde únicamente:
+    - "Lo siento, no tengo información sobre eso. Por favor, escribe **'RESERVAR'** para que un agente se comunique contigo."
+  - **No proporciones** información adicional ni especulativa fuera del contexto proporcionado.
+
+- **Comunicación Clara y Concisa**:
+  - Evita divagar o proporcionar información irrelevante.
+  - Mantén las respuestas enfocadas y directamente relacionadas con las preguntas del usuario.
+
+- **Lenguaje Profesional y Amable**:
+  - Utiliza un tono cordial y profesional en todas las interacciones.
+  - Evita suposiciones sobre el estado personal del usuario (por ejemplo, no asumir que está de cumpleaños).
+
+---
+"""
+
+# Inicialización del cliente de Hugging Face
+client = InferenceClient(
+    model=MODEL_NAME,
+    token=TOKEN
+)
+
+# Diccionario para almacenar el historial de mensajes por usuario
+chat_history = defaultdict(list)
+
+def replace_non_bmp_emojis(text):
+    """
+    Reemplaza emojis fuera del BMP con una versión segura o los elimina.
+    """
+    return re.sub(r'[\U00010000-\U0010FFFF]', '', text)
+
+def update_chat_history(user_id, role, content):
+    """
+    Actualiza el historial de chat con el rol y el contenido proporcionados.
+    """
+    if len(chat_history[user_id]) >= MAX_HISTORY_LENGTH:
+        chat_history[user_id].pop(0)  # Elimina el mensaje más antiguo
+    chat_history[user_id].append({"role": role, "content": content})
+    print(f"Historial actualizado para {user_id}: {chat_history[user_id]}")
+
+def build_messages(user_id, user_message):
+    """
+    Construye la lista de mensajes para enviar a la API, incluyendo el mensaje del sistema,
+    el historial y el mensaje actual del usuario.
+    """
+    history = chat_history[user_id]
+    messages = [{"role": "system", "content": SYSTEM_MESSAGE}] + history
+    messages.append({"role": "user", "content": user_message})
+    return messages
+
+async def get_bot_response(user_message, user_id):
+    """
+    Procesa el mensaje del usuario y devuelve la respuesta del bot.
+    """
+    # Verifica el estado del usuario desde la base de datos
+    user_state = get_user_state(user_id)
+
+    # Si el usuario ha solicitado reservar, se maneja de manera especial
+    if user_state == "RESERVAR":
+        response_text = "Gracias por tu interés en reservar. Un agente se pondrá en contacto contigo pronto."
+        return response_text
+
+    try:
+        # Construye los mensajes para la API
+        messages = build_messages(user_id, user_message)
+
+        # Llama a la API de Hugging Face
+        response = client.chat_completion(
+            messages=messages,
+            max_tokens=500
+        )
+
+        # Procesa la respuesta
+        assistant_message = response['choices'][0]['message']['content']
+        assistant_message = replace_non_bmp_emojis(assistant_message)
+
+        # Actualiza el historial de chat
+        update_chat_history(user_id, "user", user_message)
+        # update_chat_history(user_id, "assistant", assistant_message)
+
+        return assistant_message
+
+    except Exception as e:
+        # Manejo de errores y retroalimentación al usuario
+        print(f"Error al enviar la solicitud: {e}")
+        # return "Lo siento, ocurrió un error al procesar tu solicitud. Por favor, intenta nuevamente más tarde."

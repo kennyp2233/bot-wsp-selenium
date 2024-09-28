@@ -70,8 +70,38 @@ def get_last_contacts_from_messages(driver, max_contacts=10):
     
     except Exception as e:
         print(f"Error al obtener los contactos: {e}")
+        raise e
     
     return contacts
+
+import re
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+import time
+from datetime import datetime
+
+def is_time_format(time_string):
+    # Expresión regular para 12h o 24h con AM/PM opcional
+    time_patterns = [
+        r"\d{1,2}:\d{2}\s?[ap]\.?m\.?",   # Formato 12h con am/pm (ej. 2:39 p. m.)
+        r"\d{1,2}:\d{2}"                   # Formato 24h (ej. 14:39)
+    ]
+    for pattern in time_patterns:
+        if re.match(pattern, time_string, re.IGNORECASE):
+            return True
+    return False
+
+def extract_time_value(time_string):
+    # Convertir la hora a un objeto datetime para facilitar comparaciones
+    try:
+        return datetime.strptime(time_string.strip().lower(), "%I:%M %p")  # Formato 12h (ej. 2:39 p. m.)
+    except ValueError:
+        pass
+    try:
+        return datetime.strptime(time_string.strip(), "%H:%M")  # Formato 24h (ej. 14:39)
+    except ValueError:
+        return None  # No es una hora válida para nuestros propósitos
 
 def select_contact(driver, contact_name):
     try:
@@ -90,35 +120,54 @@ def select_contact(driver, contact_name):
             EC.visibility_of_element_located((By.CSS_SELECTOR, "div[aria-label='Resultados de la búsqueda.']"))
         )
 
-        # Encuentra el primer contacto en la lista de resultados
-        first_contact = WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.XPATH, "//div[@aria-label='Resultados de la búsqueda.']//div[@role='listitem'][1]"))
-        )
+        # Encuentra todos los contactos que coincidan en la lista de resultados
+        contact_elements = search_results.find_elements(By.XPATH, f"//span[contains(@title, '{contact_name}')]")
+        
+        if len(contact_elements) == 0:
+            print(f"No se encontraron contactos con el nombre {contact_name}.")
+            return
+        
+        latest_contact = None
+        latest_time = None
 
-        # Desplázate al primer contacto para asegurarte de que esté en el viewport
-        driver.execute_script("arguments[0].scrollIntoView(true);", first_contact)
-        time.sleep(0.5)  # Espera para asegurarte de que el desplazamiento haya terminado
+        # Iterar sobre cada contacto encontrado para verificar su hora
+        for contact_element in contact_elements:
+            try:
+                # Desplazar al contacto para asegurarse de que esté visible
+                driver.execute_script("arguments[0].scrollIntoView(true);", contact_element)
 
-        # Haz clic en el primer contacto
-        first_contact.click()
-        print(f"Contact {contact_name} selected.")
+                # Intentar obtener el tiempo asociado a este contacto
+                time_element = contact_element.find_element(By.XPATH, "./../../..//div[@class='_ak8i']")
+                contact_time = time_element.text.strip()
 
-        # Espera a que el chat se cargue completamente
-        WebDriverWait(driver, 20).until(
-            EC.presence_of_element_located((By.XPATH, "//div[@aria-placeholder='Escribe un mensaje']"))  # Actualiza según el atributo aria o otro identificador específico
-        )
-        print(f"Chat for contact {contact_name} is now open.")
+                # Validar si el texto es una hora válida y no una fecha (por ejemplo, 'ayer')
+                if is_time_format(contact_time):
+                    time_value = extract_time_value(contact_time)
+                    if time_value and (latest_time is None or time_value > latest_time):
+                        latest_time = time_value
+                        latest_contact = contact_element
+            except Exception as e:
+                continue  # Continuar si no se encuentra la hora o hay algún error
 
-        # Opcional: Puedes agregar un pequeño retraso aquí para asegurarte de que todo esté completamente cargado
-        time.sleep(0.5)
+        if latest_contact:
+            # Desplazar y hacer clic en el contacto con la última hora
+            driver.execute_script("arguments[0].scrollIntoView(true);", latest_contact)
+            time.sleep(0.2)
+            latest_contact.click()
+            print(f"Contact {contact_name} selected with last message at {latest_time.strftime('%I:%M %p')}.")
+
+            # Esperar a que el chat del contacto se cargue completamente
+            WebDriverWait(driver, 20).until(
+                EC.presence_of_element_located((By.XPATH, "//div[@aria-placeholder='Escribe un mensaje']"))
+            )
+            print(f"Chat for contact {contact_name} is now open.")
+        else:
+            print(f"No se encontró un contacto con horas recientes para {contact_name}.")
 
     except Exception as e:
         print(f"Error in select_contact: {e}")
-
-        # Opcional: Toma una captura de pantalla para ayudar a depurar
-        driver.save_screenshot('error_screenshot.png')
-
-
+        driver.save_screenshot('error_screenshot.png')  # Captura de pantalla en caso de error
+        raise e
 
 
 def clean_message(message):
@@ -155,15 +204,6 @@ def read_last_message(driver):
             is_outbound = is_outbound_message(last_message_element)
             print(f"Is outbound: {is_outbound}")
 
-            try:
-                close_button = WebDriverWait(driver, 5).until(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, 'span[data-icon="x-alt"]'))
-                )
-                close_button.click()
-                print("Close button clicked.")
-            except Exception as e:
-                print(f"Error in closing button: {e}")
-            
             return cleaned_message, is_outbound
         else:
             print("No messages found.")
@@ -171,6 +211,7 @@ def read_last_message(driver):
     
     except Exception as e:
         print(f"Error in read_last_message: {e}")
+        raise e
         return None, False
     
 
@@ -204,11 +245,14 @@ def send_message(driver, message):
         # Envía el mensaje final
         message_box.send_keys(Keys.RETURN)  # Utiliza RETURN para enviar el mensaje
         print("Message sent.")
+
+        
     
     except Exception as e:
         print(f"Error in send_message: {e}")
         # Opcional: Toma una captura de pantalla para ayudar a depurar
         driver.save_screenshot('error_screenshot.png')
+        raise e
 
 def clean_message(message):
     # Implementa aquí cualquier limpieza necesaria del mensaje
